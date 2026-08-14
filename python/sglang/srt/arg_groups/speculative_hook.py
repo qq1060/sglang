@@ -396,12 +396,11 @@ def _handle_dspark(server_args: ServerArgs) -> None:
     # now. Do not preserve an incoming value when that read fails: it may have
     # been serialized from another checkpoint and would mis-size CUDA graphs.
     server_args.speculative_dspark_bonus_anchor = bool(
-        draft_checkpoint_config is not None
-        and draft_checkpoint_config.speculators_convention
+        draft_checkpoint_config is not None and draft_checkpoint_config.bonus_anchor
     )
     if server_args.speculative_dspark_bonus_anchor:
         logger.info(
-            "DSpark draft checkpoint uses the speculators bonus-anchor layout; "
+            "DSpark draft checkpoint uses the legacy Speculators bonus-anchor layout; "
             "the draft block is gamma + 1 slots wide (slot 0 is the anchor and "
             "is not sampled)."
         )

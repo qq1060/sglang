@@ -144,14 +144,9 @@ class DSparkWorkerV2(BaseSpecWorker):
         self.verify_num_draft_tokens = runtime_config.verify_num_draft_tokens
         self.speculative_num_draft_tokens = self.verify_num_draft_tokens
         self._mask_token_id = runtime_config.mask_token_id
-        # speculators-trained checkpoints use a gamma+1-wide draft block
-        # (anchor is a separate bonus/conditioning token) instead of
-        # DeepSpec's gamma-wide anchor-first block -- see the docstring on
-        # DSparkDraftConfig.speculators_convention (dspark_config.py) and on
-        # DraftBlockProposer (dspark_draft.py). Threaded through to both the
-        # eager (DraftBlockProposer) and CUDA-graph-folded (DsparkDraftSampler)
-        # draft-sampling paths below.
-        self._bonus_anchor = runtime_config.speculators_convention
+        # Thread the checkpoint layout through both eager and CUDA-graph draft
+        # sampling paths.
+        self._bonus_anchor = runtime_config.bonus_anchor
         # The same fact is resolved twice by design: here from the draft config
         # this worker actually loaded, and at startup onto ServerArgs (see
         # _handle_dspark) because that is the only copy the CUDA-graph capture
@@ -172,7 +167,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             )
         if self.ps.tp_rank == 0 and self._bonus_anchor:
             logger.info(
-                "DSpark draft checkpoint uses the speculators bonus-anchor "
+                "DSpark draft checkpoint uses the legacy Speculators bonus-anchor "
                 "convention (gamma+1-wide draft block, anchor excluded from "
                 "sampling)."
             )
