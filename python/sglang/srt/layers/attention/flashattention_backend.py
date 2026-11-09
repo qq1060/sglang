@@ -1541,6 +1541,37 @@ class FlashAttentionBackend(AttentionBackend):
                 return None
         return (*buffers, locations)
 
+    def _forward_suffix_attention(
+        self, q, key_cache, value_cache, layer, window_size, kwargs, ver
+    ):
+        """One query per suffix sequence, with FlashAttention's varlen LSE layout."""
+        metadata = self.forward_metadata_spec_decode_expand
+        # FA4 can map one-query suffixes directly, without its varlen scheduler.
+        # Optional modifiers and scale tensors keep their original query layout.
+        fixed_length = ver == 4 and not kwargs
+        result = self.flash_attn_with_kvcache(
+            q=q.unsqueeze(1) if fixed_length else q,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            page_table=metadata.page_table,
+            cache_seqlens=metadata.cache_seqlens_int32,
+            cu_seqlens_q=None if fixed_length else metadata.cu_seqlens_q,
+            cu_seqlens_k_new=None if fixed_length else metadata.cu_seqlens_k,
+            max_seqlen_q=1,
+            softmax_scale=layer.scaling,
+            causal=False,
+            window_size=window_size,
+            softcap=layer.logit_cap,
+            return_softmax_lse=True,
+            num_splits=self.num_splits,
+            **kwargs,
+            ver=ver,
+        )
+        if fixed_length:
+            output, lse, *rest = result
+            return output.squeeze(1), lse.squeeze(-1).T, *rest
+        return result
+
     def forward_extend(
         self,
         q: torch.Tensor,
@@ -1911,30 +1942,21 @@ class FlashAttentionBackend(AttentionBackend):
                 )
             elif use_cascade_attn:
                 o_expand, softmax_lse_expand, *rest_expand = (
-                    self.flash_attn_with_kvcache(
-                        q=q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
+                    self._forward_suffix_attention(
+                        q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
                         # The suffix table stores physical token slots, so expose
                         # the paged cache as page-size-one blocks.
-                        k_cache=paged_view(
+                        paged_view(
                             key_cache.view(-1, layer.tp_k_head_num, layer.head_dim), 1
                         ),
-                        v_cache=paged_view(
+                        paged_view(
                             value_cache.view(-1, layer.tp_v_head_num, layer.v_head_dim),
                             1,
                         ),
-                        page_table=self.forward_metadata_spec_decode_expand.page_table,
-                        cache_seqlens=self.forward_metadata_spec_decode_expand.cache_seqlens_int32,
-                        cu_seqlens_q=self.forward_metadata_spec_decode_expand.cu_seqlens_q,
-                        cu_seqlens_k_new=self.forward_metadata_spec_decode_expand.cu_seqlens_k,
-                        max_seqlen_q=self.forward_metadata_spec_decode_expand.max_seq_len_q,
-                        softmax_scale=layer.scaling,
-                        causal=False,
-                        window_size=window_size,
-                        softcap=layer.logit_cap,
-                        return_softmax_lse=True,
-                        num_splits=self.num_splits,
-                        **kwargs,
-                        ver=ver,
+                        layer,
+                        window_size,
+                        kwargs,
+                        ver,
                     )
                 )
                 o, _ = merge_state_v2_wrapper(
@@ -2386,23 +2408,14 @@ class FlashAttentionBackend(AttentionBackend):
                             self.forward_metadata_spec_decode_expand.max_seq_len_k
                         )
                     o_expand, softmax_lse_expand, *rest_expand = (
-                        self.flash_attn_with_kvcache(
-                            q=q_reshaped,
-                            k_cache=key_cache,
-                            v_cache=value_cache,
-                            page_table=self.forward_metadata_spec_decode_expand.page_table,
-                            cache_seqlens=self.forward_metadata_spec_decode_expand.cache_seqlens_int32,
-                            cu_seqlens_q=self.forward_metadata_spec_decode_expand.cu_seqlens_q,
-                            cu_seqlens_k_new=self.forward_metadata_spec_decode_expand.cu_seqlens_k,
-                            max_seqlen_q=self.forward_metadata_spec_decode_expand.max_seq_len_q,
-                            softmax_scale=layer.scaling,
-                            causal=False,
-                            window_size=window_size,
-                            softcap=layer.logit_cap,
-                            return_softmax_lse=True,
-                            num_splits=self.num_splits,
-                            **kwargs,
-                            ver=ver,
+                        self._forward_suffix_attention(
+                            q_reshaped,
+                            key_cache,
+                            value_cache,
+                            layer,
+                            window_size,
+                            kwargs,
+                            ver,
                         )
                     )
                     o, _ = merge_state_v2(
